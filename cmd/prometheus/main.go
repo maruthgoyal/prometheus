@@ -192,6 +192,7 @@ type flagConfig struct {
 	queryMaxSamples             int
 	RemoteFlushDeadline         model.Duration
 	maxNotificationsSubscribers int
+	enableK8sAPIServerCache     bool
 
 	enableAutoReload   bool
 	autoReloadInterval model.Duration
@@ -391,6 +392,9 @@ func main() {
 
 	a.Flag("web.cors.origin", `Regex for CORS origin. It is fully anchored. Example: 'https?://(domain1|domain2)\.com'`).
 		Default(".*").StringVar(&cfg.corsRegexString)
+
+	a.Flag("discovery.kubernetes.enable-api-server-cache", "Enable API server cache for Kubernetes service discovery").
+		Default("false").BoolVar(&cfg.enableK8sAPIServerCache)
 
 	serverOnlyFlag(a, "storage.tsdb.path", "Base path for metrics storage.").
 		Default("data/").StringVar(&cfg.serverStoragePath)
@@ -594,6 +598,9 @@ func main() {
 		logger.Error(fmt.Sprintf("Error loading config (--config.file=%s)", cfg.configFile), "file", absPath, "err", err)
 		os.Exit(2)
 	}
+
+	// Set the Kubernetes API server cache flag in the config
+	cfgFile.GlobalConfig.EnableK8sAPIServerCache = cfg.enableK8sAPIServerCache
 	// Get scrape configs to validate dynamically loaded scrape_config_files.
 	// They can change over time, but do the extra validation on startup for better experience.
 	if _, err := cfgFile.GetScrapeConfigs(); err != nil {

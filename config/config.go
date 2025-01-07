@@ -480,6 +480,8 @@ type GlobalConfig struct {
 	KeepDroppedTargets uint `yaml:"keep_dropped_targets,omitempty"`
 	// Allow UTF8 Metric and Label Names.
 	MetricNameValidationScheme string `yaml:"metric_name_validation_scheme,omitempty"`
+	// Enable API server cache for Kubernetes service discovery.
+	EnableK8sAPIServerCache bool `yaml:"enable_k8s_api_server_cache,omitempty"`
 }
 
 // ScrapeProtocol represents supported protocol for scraping metrics.
