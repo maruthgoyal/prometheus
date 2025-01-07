@@ -110,13 +110,14 @@ const (
 
 // SDConfig is the configuration for Kubernetes service discovery.
 type SDConfig struct {
-	APIServer          config.URL              `yaml:"api_server,omitempty"`
-	Role               Role                    `yaml:"role"`
-	KubeConfig         string                  `yaml:"kubeconfig_file"`
-	HTTPClientConfig   config.HTTPClientConfig `yaml:",inline"`
-	NamespaceDiscovery NamespaceDiscovery      `yaml:"namespaces,omitempty"`
-	Selectors          []SelectorConfig        `yaml:"selectors,omitempty"`
-	AttachMetadata     AttachMetadataConfig    `yaml:"attach_metadata,omitempty"`
+	APIServer             config.URL              `yaml:"api_server,omitempty"`
+	Role                  Role                    `yaml:"role"`
+	KubeConfig            string                  `yaml:"kubeconfig_file"`
+	HTTPClientConfig      config.HTTPClientConfig `yaml:",inline"`
+	NamespaceDiscovery    NamespaceDiscovery      `yaml:"namespaces,omitempty"`
+	Selectors             []SelectorConfig        `yaml:"selectors,omitempty"`
+	AttachMetadata        AttachMetadataConfig    `yaml:"attach_metadata,omitempty"`
+	EnableAPIServerCache  bool                    `yaml:"enable_api_server_cache,omitempty"`
 }
 
 // NewDiscovererMetrics implements discovery.Config.
@@ -258,15 +259,16 @@ func (c *NamespaceDiscovery) UnmarshalYAML(unmarshal func(interface{}) error) er
 // targets from Kubernetes.
 type Discovery struct {
 	sync.RWMutex
-	client             kubernetes.Interface
-	role               Role
-	logger             *slog.Logger
-	namespaceDiscovery *NamespaceDiscovery
-	discoverers        []discovery.Discoverer
-	selectors          roleSelector
-	ownNamespace       string
-	attachMetadata     AttachMetadataConfig
-	metrics            *kubernetesMetrics
+	client               kubernetes.Interface
+	role                 Role
+	logger               *slog.Logger
+	namespaceDiscovery   *NamespaceDiscovery
+	discoverers          []discovery.Discoverer
+	selectors            roleSelector
+	ownNamespace         string
+	attachMetadata       AttachMetadataConfig
+	metrics              *kubernetesMetrics
+	enableAPIServerCache bool
 }
 
 func (d *Discovery) getNamespaces() []string {
@@ -282,6 +284,14 @@ func (d *Discovery) getNamespaces() []string {
 	}
 
 	return namespaces
+}
+
+func (d *Discovery) setListOptions(options *metav1.ListOptions, fieldSelector, labelSelector string) {
+	options.FieldSelector = fieldSelector
+	options.LabelSelector = labelSelector
+	if d.enableAPIServerCache {
+		options.ResourceVersion = "0"
+	}
 }
 
 // New creates a new Kubernetes discovery for the given role.
@@ -345,15 +355,16 @@ func New(l *slog.Logger, metrics discovery.DiscovererMetrics, conf *SDConfig) (*
 	}
 
 	d := &Discovery{
-		client:             c,
-		logger:             l,
-		role:               conf.Role,
-		namespaceDiscovery: &conf.NamespaceDiscovery,
-		discoverers:        make([]discovery.Discoverer, 0),
-		selectors:          mapSelector(conf.Selectors),
-		ownNamespace:       ownNamespace,
-		attachMetadata:     conf.AttachMetadata,
-		metrics:            m,
+		client:               c,
+		logger:               l,
+		role:                 conf.Role,
+		namespaceDiscovery:   &conf.NamespaceDiscovery,
+		discoverers:          make([]discovery.Discoverer, 0),
+		selectors:            mapSelector(conf.Selectors),
+		ownNamespace:         ownNamespace,
+		attachMetadata:       conf.AttachMetadata,
+		metrics:              m,
+		enableAPIServerCache: conf.EnableAPIServerCache,
 	}
 
 	return d, nil
@@ -402,8 +413,7 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 			e := d.client.DiscoveryV1().EndpointSlices(namespace)
 			elw := &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-					options.FieldSelector = d.selectors.endpointslice.field
-					options.LabelSelector = d.selectors.endpointslice.label
+					d.setListOptions(&options, d.selectors.endpointslice.field, d.selectors.endpointslice.label)
 					return e.List(ctx, options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
@@ -463,13 +473,11 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 			e := d.client.CoreV1().Endpoints(namespace)
 			elw := &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-					options.FieldSelector = d.selectors.endpoints.field
-					options.LabelSelector = d.selectors.endpoints.label
+					d.setListOptions(&options, d.selectors.endpoints.field, d.selectors.endpoints.label)
 					return e.List(ctx, options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-					options.FieldSelector = d.selectors.endpoints.field
-					options.LabelSelector = d.selectors.endpoints.label
+					d.setListOptions(&options, d.selectors.endpoints.field, d.selectors.endpoints.label)
 					return e.Watch(ctx, options)
 				},
 			}
@@ -577,13 +585,11 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*targetgroup.Group) {
 			i := d.client.NetworkingV1().Ingresses(namespace)
 			ilw := &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-					options.FieldSelector = d.selectors.ingress.field
-					options.LabelSelector = d.selectors.ingress.label
+					d.setListOptions(&options, d.selectors.ingress.field, d.selectors.ingress.label)
 					return i.List(ctx, options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-					options.FieldSelector = d.selectors.ingress.field
-					options.LabelSelector = d.selectors.ingress.label
+					d.setListOptions(&options, d.selectors.ingress.field, d.selectors.ingress.label)
 					return i.Watch(ctx, options)
 				},
 			}
@@ -653,13 +659,11 @@ func retryOnError(ctx context.Context, interval time.Duration, f func() error) (
 func (d *Discovery) newNodeInformer(ctx context.Context) cache.SharedInformer {
 	nlw := &cache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-			options.FieldSelector = d.selectors.node.field
-			options.LabelSelector = d.selectors.node.label
+			d.setListOptions(&options, d.selectors.node.field, d.selectors.node.label)
 			return d.client.CoreV1().Nodes().List(ctx, options)
 		},
 		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-			options.FieldSelector = d.selectors.node.field
-			options.LabelSelector = d.selectors.node.label
+			d.setListOptions(&options, d.selectors.node.field, d.selectors.node.label)
 			return d.client.CoreV1().Nodes().Watch(ctx, options)
 		},
 	}
